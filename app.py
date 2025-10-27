@@ -126,20 +126,16 @@ def track_email(email, campaign_id):
         
         if existing.data:
             # Update existing record - only update last_opened_at, keep first_opened_at unchanged
-            # Double-check that we found the exact match for email AND campaign_id
             matched_record = existing.data[0]
-            if matched_record.get('email') == email and matched_record.get('campaign_id') == campaign_id:
-                current_count = matched_record.get('open_count', 0)
-                
-                result = supabase.table('Mails').update({
-                    'status': True,
-                    'open_count': current_count + 1,
-                    'last_opened_at': datetime.now().isoformat()  # Only update last opened time
-                }).eq('email', email).eq('campaign_id', campaign_id).execute()
-                
-                logging.info(f"Updated existing record for email: {email}, campaign: {campaign_id}")
-            else:
-                logging.warning(f"Record found but email/campaign_id mismatch for: {email}, {campaign_id}")
+            current_count = matched_record.get('open_count', 0)
+            
+            result = supabase.table('Mails').update({
+                'status': True,
+                'open_count': current_count + 1,
+                'last_opened_at': datetime.now().isoformat()  # Only update last opened time
+            }).eq('email', email).eq('campaign_id', campaign_id).execute()
+            
+            logging.info(f"Updated existing record for email: {email}, campaign: {campaign_id}")
             
         else:
             # Insert new record - set both first and last opened times to current time
