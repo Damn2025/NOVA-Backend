@@ -132,7 +132,7 @@ def track_email(email, campaign_id):
                 current_count = matched_record.get('open_count', 0)
                 
                 result = supabase.table('Mails').update({
-                    'status': 'Opened',
+                    'status': True,
                     'open_count': current_count + 1,
                     'last_opened_at': datetime.now().isoformat()  # Only update last opened time
                 }).eq('email', email).eq('campaign_id', campaign_id).execute()
@@ -147,7 +147,7 @@ def track_email(email, campaign_id):
             result = supabase.table('Mails').insert({
                 'email': email,
                 'campaign_id': campaign_id,
-                'status': 'Opened',
+                'status': True,
                 'open_count': 1,
                 'first_opened_at': current_time,  # Set first opened time
                 'last_opened_at': current_time,   # Set last opened time (same as first for first open)
