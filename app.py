@@ -127,7 +127,7 @@ def track_email(email, campaign_id):
         if existing.data:
             # Update existing record - only update last_opened_at, keep first_opened_at unchanged
             matched_record = existing.data[0]
-            current_count = matched_record.get('open_count', 0)
+            current_count = matched_record.get('open_count') or 0  # Handle None values
             
             result = supabase.table('Mails').update({
                 'status': True,
