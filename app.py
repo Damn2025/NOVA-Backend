@@ -160,7 +160,7 @@ def track_email(email, campaign_id):
                 # This is a followup email - update the corresponding followup status and timestamp
                 followup_status_field = f'{followup_type}_track'  # f1_status, f2_status, etc.
                 followup_timestamp_field = f'{followup_type.lower()}_opened_at'  # f1_opened_at, f2_opened_at, etc.
-                update_data[followup_status_field] = True
+                update_data[followup_status_field] = Opened
                 update_data[followup_timestamp_field] = current_time
                 logging.info(f"Updated {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}")
             else:
