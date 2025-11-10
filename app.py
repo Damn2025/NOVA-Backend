@@ -103,7 +103,15 @@ def initialize_database():
         logging.info("Please ensure your Supabase Mails table has the following columns:")
         logging.info("- email")
         logging.info("- campaign_id") 
-        logging.info("- status")
+        logging.info("- status (boolean, for main email)")
+        logging.info("- f1_status (boolean, for followup 1)")
+        logging.info("- f1_opened_at (timestamp, for followup 1)")
+        logging.info("- f2_status (boolean, for followup 2)")
+        logging.info("- f2_opened_at (timestamp, for followup 2)")
+        logging.info("- f3_status (boolean, for followup 3)")
+        logging.info("- f3_opened_at (timestamp, for followup 3)")
+        logging.info("- f4_status (boolean, for followup 4)")
+        logging.info("- f4_opened_at (timestamp, for followup 4)")
         logging.info("- open_count (optional)")
         logging.info("- first_opened_at (optional)")
         logging.info("- last_opened_at (optional)")
@@ -113,58 +121,137 @@ pixel_data = (
     b'\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00'
     b'\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x4c\x01\x00\x3b'
 )
-@app.route('/track/<email>/<campaign_id>')
+@app.route('/track/<email>/<path:campaign_id>')
 def track_email(email, campaign_id):
     try:
         ip_address = request.remote_addr
         
+        # Check if this is a followup email (F1, F2, F3, F4)
+        followup_type = None
+        if 'F1' in campaign_id:
+            followup_type = 'F1'
+        elif 'F2' in campaign_id:
+            followup_type = 'F2'
+        elif 'F3' in campaign_id:
+            followup_type = 'F3'
+        elif 'F4' in campaign_id:
+            followup_type = 'F4'
+        
         # Store open event in Supabase Mails table
         supabase = get_supabase_client()
         
-        # First, try to get existing record by email and campaign_id
-        existing = supabase.table('Mails').select('*').eq('email', email).eq('campaign_id', campaign_id).execute()
+        # Extract base campaign_id (remove F1, F2, F3, F4 suffix for matching)
+        base_campaign_id = campaign_id.replace('F1', '').replace('F2', '').replace('F3', '').replace('F4', '').strip()
+        # Remove trailing slashes if any
+        base_campaign_id = base_campaign_id.rstrip('/')
+        
+        # First, try to get existing record by email and base campaign_id
+        existing = supabase.table('Mails').select('*').eq('email', email).eq('campaign_id', base_campaign_id).execute()
         
         if existing.data:
             # Update existing record
             matched_record = existing.data[0]
-            current_count = matched_record.get('open_count') or 0  # Handle None values
-            first_opened = matched_record.get('first_opened_at')
             current_time = datetime.now().isoformat()
             
             # Build update data
-            update_data = {
-                'status': True,
-                'open_count': current_count + 1,
-                'last_opened_at': current_time
-            }
+            update_data = {}
             
-            # If first_opened_at is None, set it now (first time opening)
-            if first_opened is None or first_opened == '':
-                update_data['first_opened_at'] = current_time
+            if followup_type:
+                # This is a followup email - update the corresponding followup status and timestamp
+                followup_status_field = f'{followup_type}_track'  # f1_status, f2_status, etc.
+                followup_timestamp_field = f'{followup_type.lower()}_opened_at'  # f1_opened_at, f2_opened_at, etc.
+                update_data[followup_status_field] = True
+                update_data[followup_timestamp_field] = current_time
+                logging.info(f"Updated {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}")
+            else:
+                # This is the main email - use existing logic
+                current_count = matched_record.get('open_count') or 0  # Handle None values
+                first_opened = matched_record.get('first_opened_at')
+                
+                update_data = {
+                    'status': True,
+                    'open_count': current_count + 1,
+                    'last_opened_at': current_time
+                }
+                
+                # If first_opened_at is None, set it now (first time opening)
+                if first_opened is None or first_opened == '':
+                    update_data['first_opened_at'] = current_time
+                
+                logging.info(f"Updated existing record for email: {email}, campaign: {base_campaign_id}")
             
-            result = supabase.table('Mails').update(update_data).eq('email', email).eq('campaign_id', campaign_id).execute()
-            
-            logging.info(f"Updated existing record for email: {email}, campaign: {campaign_id}")
+            result = supabase.table('Mails').update(update_data).eq('email', email).eq('campaign_id', base_campaign_id).execute()
             
         else:
-            # Insert new record - set both first and last opened times to current time
+            # Insert new record
             current_time = datetime.now().isoformat()
-            result = supabase.table('Mails').insert({
+            insert_data = {
                 'email': email,
-                'campaign_id': campaign_id,
-                'status': True,
-                'open_count': 1,
-                'first_opened_at': current_time,  # Set first opened time
-                'last_opened_at': current_time,   # Set last opened time (same as first for first open)
-            }).execute()
+                'campaign_id': base_campaign_id,
+                'first_opened_at': current_time,
+                'last_opened_at': current_time,
+            }
             
-            logging.info(f"Created new record for email: {email}, campaign: {campaign_id}")
+            if followup_type:
+                # This is a followup email - set the corresponding followup status and timestamp
+                followup_status_field = f'{followup_type}_track'  # F1_track etc.
+                followup_timestamp_field = f'{followup_type.lower()}_opened_at'  # f1_opened_at, f2_opened_at, etc.
+                insert_data[followup_status_field] = True
+                insert_data[followup_timestamp_field] = current_time
+                logging.info(f"Created new record with {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}")
+            else:
+                # This is the main email - set main status
+                insert_data['status'] = True
+                insert_data['open_count'] = 1
+                logging.info(f"Created new record for email: {email}, campaign: {base_campaign_id}")
+            
+            result = supabase.table('Mails').insert(insert_data).execute()
         
-        logging.info(f"Email open tracked for email: {email}, campaign: {campaign_id}")
+        logging.info(f"Email open tracked for email: {email}, campaign: {campaign_id}, followup: {followup_type or 'main'}")
 
     except Exception as e:
         logging.error(f"Error logging email open: {e}")
     return Response(pixel_data, mimetype='image/gif')
+
+@app.route('/email')
+def main_email():
+    """Main email page"""
+    email = request.args.get('email', 'test@example.com')
+    campaign_id = request.args.get('campaign_id', '1')
+    base_url = os.environ.get('BACKEND_BASE_URL', 'http://127.0.0.1:5001')
+    return render_template('main_email.html', email=email, campaign_id=campaign_id, base_url=base_url)
+
+@app.route('/email/f1')
+def followup1():
+    """Followup 1 email page"""
+    email = request.args.get('email', 'test@example.com')
+    campaign_id = request.args.get('campaign_id', '1')
+    base_url = os.environ.get('BACKEND_BASE_URL', 'http://127.0.0.1:5001')
+    return render_template('followup1.html', email=email, campaign_id=campaign_id, base_url=base_url)
+
+@app.route('/email/f2')
+def followup2():
+    """Followup 2 email page"""
+    email = request.args.get('email', 'test@example.com')
+    campaign_id = request.args.get('campaign_id', '1')
+    base_url = os.environ.get('BACKEND_BASE_URL', 'http://127.0.0.1:5001')
+    return render_template('followup2.html', email=email, campaign_id=campaign_id, base_url=base_url)
+
+@app.route('/email/f3')
+def followup3():
+    """Followup 3 email page"""
+    email = request.args.get('email', 'test@example.com')
+    campaign_id = request.args.get('campaign_id', '1')
+    base_url = os.environ.get('BACKEND_BASE_URL', 'http://127.0.0.1:5001')
+    return render_template('followup3.html', email=email, campaign_id=campaign_id, base_url=base_url)
+
+@app.route('/email/f4')
+def followup4():
+    """Followup 4 email page"""
+    email = request.args.get('email', 'test@example.com')
+    campaign_id = request.args.get('campaign_id', '1')
+    base_url = os.environ.get('BACKEND_BASE_URL', 'http://127.0.0.1:5001')
+    return render_template('followup4.html', email=email, campaign_id=campaign_id, base_url=base_url)
 
 @app.route('/test-env')
 def test_environment():
