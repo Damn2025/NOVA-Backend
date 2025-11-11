@@ -126,9 +126,12 @@ def track_email(email, campaign_id):
     try:
         ip_address = request.remote_addr
         
-        # Check if this is a followup email (F1, F2, F3, F4)
+        # Check if this is a followup email (F1, F2, F3, F4) or main email (MAIN)
         followup_type = None
-        if 'F1' in campaign_id:
+        is_main_email = False
+        if '/MAIN' in campaign_id or campaign_id.endswith('/MAIN') or campaign_id.endswith('MAIN'):
+            is_main_email = True
+        elif 'F1' in campaign_id:
             followup_type = 'F1'
         elif 'F2' in campaign_id:
             followup_type = 'F2'
@@ -140,8 +143,8 @@ def track_email(email, campaign_id):
         # Store open event in Supabase Mails table
         supabase = get_supabase_client()
         
-        # Extract base campaign_id (remove F1, F2, F3, F4 suffix for matching)
-        base_campaign_id = campaign_id.replace('F1', '').replace('F2', '').replace('F3', '').replace('F4', '').strip()
+        # Extract base campaign_id (remove F1, F2, F3, F4, MAIN suffix for matching)
+        base_campaign_id = campaign_id.replace('F1', '').replace('F2', '').replace('F3', '').replace('F4', '').replace('/MAIN', '').replace('MAIN', '').strip()
         # Remove trailing slashes if any
         base_campaign_id = base_campaign_id.rstrip('/')
         
@@ -163,8 +166,9 @@ def track_email(email, campaign_id):
                     followup_timestamp_field: current_time
                 }
                 logging.info(f"Updated {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}")
-            else:
+            elif is_main_email:
                 # This is the main email - use existing logic
+                # Only update main email fields if explicitly marked as MAIN
                 current_count = matched_record.get('open_count') or 0  # Handle None values
                 first_opened = matched_record.get('first_opened_at')
                 
@@ -179,6 +183,10 @@ def track_email(email, campaign_id):
                     update_data['first_opened_at'] = current_time
                 
                 logging.info(f"Updated existing record for email: {email}, campaign: {base_campaign_id}")
+            else:
+                # URL doesn't match any pattern (not a followup, not explicitly MAIN)
+                logging.warning(f"Unrecognized tracking URL pattern for email: {email}, campaign: {campaign_id}. No update performed.")
+                return Response(pixel_data, mimetype='image/gif')
             
             result = supabase.table('Mails').update(update_data).eq('email', email).eq('campaign_id', base_campaign_id).execute()
             
@@ -198,8 +206,9 @@ def track_email(email, campaign_id):
                     followup_timestamp_field: current_time
                 }
                 logging.info(f"Created new record with {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}")
-            else:
+            elif is_main_email:
                 # This is the main email - set main status
+                # Only set main email fields if explicitly marked as MAIN
                 insert_data = {
                     'email': email,
                     'campaign_id': base_campaign_id,
@@ -209,10 +218,15 @@ def track_email(email, campaign_id):
                     'last_opened_at': current_time
                 }
                 logging.info(f"Created new record for email: {email}, campaign: {base_campaign_id}")
+            else:
+                # URL doesn't match any pattern (not a followup, not explicitly MAIN)
+                logging.warning(f"Unrecognized tracking URL pattern for email: {email}, campaign: {campaign_id}. No insert performed.")
+                return Response(pixel_data, mimetype='image/gif')
             
             result = supabase.table('Mails').insert(insert_data).execute()
         
-        logging.info(f"Email open tracked for email: {email}, campaign: {campaign_id}, followup: {followup_type or 'main'}")
+        email_type = followup_type if followup_type else ('main' if is_main_email else 'unknown')
+        logging.info(f"Email open tracked for email: {email}, campaign: {campaign_id}, type: {email_type}")
 
     except Exception as e:
         logging.error(f"Error logging email open: {e}")
