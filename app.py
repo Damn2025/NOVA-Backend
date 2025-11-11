@@ -153,15 +153,15 @@ def track_email(email, campaign_id):
             matched_record = existing.data[0]
             current_time = datetime.now().isoformat()
             
-            # Build update data
-            update_data = {}
-            
             if followup_type:
-                # This is a followup email - update the corresponding followup status and timestamp
-                followup_status_field = f'{followup_type}_track'  # f1_status, f2_status, etc.
+                # This is a followup email - ONLY update the corresponding followup status and timestamp
+                # DO NOT touch main email fields (status, open_count, etc.)
+                followup_status_field = f'{followup_type}_track'  # F1_track, F2_track, etc.
                 followup_timestamp_field = f'{followup_type.lower()}_opened_at'  # f1_opened_at, f2_opened_at, etc.
-                update_data[followup_status_field] = 'Opened'
-                update_data[followup_timestamp_field] = current_time
+                update_data = {
+                    followup_status_field: 'Opened',
+                    followup_timestamp_field: current_time
+                }
                 logging.info(f"Updated {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}")
             else:
                 # This is the main email - use existing logic
@@ -185,24 +185,29 @@ def track_email(email, campaign_id):
         else:
             # Insert new record
             current_time = datetime.now().isoformat()
-            insert_data = {
-                'email': email,
-                'campaign_id': base_campaign_id,
-                'first_opened_at': current_time,
-                'last_opened_at': current_time,
-            }
             
             if followup_type:
-                # This is a followup email - set the corresponding followup status and timestamp
-                followup_status_field = f'{followup_type}_track'  # F1_track etc.
+                # This is a followup email - ONLY set the corresponding followup status and timestamp
+                # DO NOT set main email fields (status, open_count, etc.)
+                followup_status_field = f'{followup_type}_track'  # F1_track, F2_track, etc.
                 followup_timestamp_field = f'{followup_type.lower()}_opened_at'  # f1_opened_at, f2_opened_at, etc.
-                insert_data[followup_status_field] = True
-                insert_data[followup_timestamp_field] = current_time
+                insert_data = {
+                    'email': email,
+                    'campaign_id': base_campaign_id,
+                    followup_status_field: 'Opened',
+                    followup_timestamp_field: current_time
+                }
                 logging.info(f"Created new record with {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}")
             else:
                 # This is the main email - set main status
-                insert_data['status'] = True
-                insert_data['open_count'] = 1
+                insert_data = {
+                    'email': email,
+                    'campaign_id': base_campaign_id,
+                    'status': True,
+                    'open_count': 1,
+                    'first_opened_at': current_time,
+                    'last_opened_at': current_time
+                }
                 logging.info(f"Created new record for email: {email}, campaign: {base_campaign_id}")
             
             result = supabase.table('Mails').insert(insert_data).execute()
