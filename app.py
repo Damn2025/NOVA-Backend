@@ -152,11 +152,6 @@ def track_email(email, campaign_id):
                     f"User-Agent: {user_agent[:100]}, Referer: {referer[:100]}, "
                     f"Automated: {is_likely_automated}")
         
-        # Skip ALL database updates if detected as automated
-        if is_likely_automated:
-            logging.info(f"Skipping automated open - Email: {email}, Campaign: {campaign_id}, User-Agent: {user_agent[:100]}")
-            return Response(pixel_data, mimetype='image/gif')
-        
         # Check if this is a followup email (F1, F2, F3, F4) or main email (MAIN)
         followup_type = None
         is_main_email = False
@@ -182,11 +177,39 @@ def track_email(email, campaign_id):
         # First, try to get existing record by email and base campaign_id
         existing = supabase.table('Mails').select('*').eq('email', email).eq('campaign_id', base_campaign_id).execute()
         
+        # Check for duplicate opens within a short time window (likely automated)
+        # This helps filter out rapid automated requests
         current_time = datetime.now().isoformat()
+        is_duplicate_open = False
+        
+        if existing.data:
+            matched_record = existing.data[0]
+            last_opened = matched_record.get('last_opened_at')
+            
+            if last_opened:
+                try:
+                    last_opened_dt = datetime.fromisoformat(last_opened.replace('Z', '+00:00'))
+                    current_dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
+                    time_diff = (current_dt.replace(tzinfo=None) - last_opened_dt.replace(tzinfo=None)).total_seconds()
+                    
+                    # If opened within 2 seconds of last open, likely automated
+                    if time_diff < 2:
+                        is_duplicate_open = True
+                        logging.warning(f"Potential duplicate/automated open detected for {email} within {time_diff:.2f} seconds")
+                except Exception as e:
+                    logging.warning(f"Error checking duplicate open time: {e}")
         
         if existing.data:
             # Update existing record
             matched_record = existing.data[0]
+            
+            # Skip tracking if it's likely automated AND a duplicate (within 2 seconds)
+            # Note: We still track automated opens but mark them for analysis
+            if is_likely_automated and is_duplicate_open:
+                logging.info(f"Skipping duplicate automated open for {email}, campaign: {base_campaign_id}")
+                return Response(pixel_data, mimetype='image/gif')
+            
+            # current_time is already set above
             if followup_type:
                 # This is a followup email - ONLY update the corresponding followup status and timestamp
                 # DO NOT touch main email fields (status, open_count, etc.)
@@ -196,7 +219,10 @@ def track_email(email, campaign_id):
                     followup_status_field: 'Opened',
                     followup_timestamp_field: current_time
                 }
-                logging.info(f"Updated {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}, IP: {ip_address}")
+                # Store metadata for analysis (if your database supports it)
+                # You can add columns like: ip_address, user_agent, is_automated
+                logging.info(f"Updated {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}, "
+                           f"Automated: {is_likely_automated}, IP: {ip_address}")
             elif is_main_email:
                 # This is the main email - use existing logic
                 # Only update main email fields if explicitly marked as MAIN
@@ -214,7 +240,7 @@ def track_email(email, campaign_id):
                     update_data['first_opened_at'] = current_time
                 
                 logging.info(f"Updated existing record for email: {email}, campaign: {base_campaign_id}, "
-                           f"IP: {ip_address}, Open Count: {current_count + 1}")
+                           f"Automated: {is_likely_automated}, IP: {ip_address}, Open Count: {current_count + 1}")
             else:
                 # URL doesn't match any pattern (not a followup, not explicitly MAIN)
                 logging.warning(f"Unrecognized tracking URL pattern for email: {email}, campaign: {campaign_id}. No update performed.")
@@ -224,6 +250,11 @@ def track_email(email, campaign_id):
             
         else:
             # Insert new record
+            # Skip if it's likely automated (many automated opens happen immediately)
+            if is_likely_automated:
+                logging.info(f"Skipping likely automated open for new record: {email}, campaign: {base_campaign_id}")
+                return Response(pixel_data, mimetype='image/gif')
+            
             if followup_type:
                 # This is a followup email - ONLY set the corresponding followup status and timestamp
                 # DO NOT set main email fields (status, open_count, etc.)
