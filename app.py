@@ -125,6 +125,32 @@ pixel_data = (
 def track_email(email, campaign_id):
     try:
         ip_address = request.remote_addr
+        user_agent = request.headers.get('User-Agent', 'Unknown')
+        referer = request.headers.get('Referer', '')
+        
+        # Detect potentially automated opens (email clients, scanners, preview panes)
+        # Known automated user agents and patterns
+        automated_patterns = [
+            'GoogleImageProxy',  # Gmail image proxy
+            'YahooMailProxy',    # Yahoo Mail proxy
+            'Microsoft Office',  # Outlook
+            'Outlook-Express',   # Outlook Express
+            'Thunderbird',       # Mozilla Thunderbird
+            'Mail',              # Apple Mail
+            'AppleWebKit',       # WebKit-based clients
+            'bot',               # Generic bots
+            'crawler',           # Crawlers
+            'spider',            # Spiders
+            'scanner',           # Security scanners
+            'preview',           # Preview services
+        ]
+        
+        is_likely_automated = any(pattern.lower() in user_agent.lower() for pattern in automated_patterns)
+        
+        # Log detailed information for analysis
+        logging.info(f"Tracking request - Email: {email}, Campaign: {campaign_id}, IP: {ip_address}, "
+                    f"User-Agent: {user_agent[:100]}, Referer: {referer[:100]}, "
+                    f"Automated: {is_likely_automated}")
         
         # Check if this is a followup email (F1, F2, F3, F4) or main email (MAIN)
         followup_type = None
@@ -151,11 +177,39 @@ def track_email(email, campaign_id):
         # First, try to get existing record by email and base campaign_id
         existing = supabase.table('Mails').select('*').eq('email', email).eq('campaign_id', base_campaign_id).execute()
         
+        # Check for duplicate opens within a short time window (likely automated)
+        # This helps filter out rapid automated requests
+        current_time = datetime.now().isoformat()
+        is_duplicate_open = False
+        
+        if existing.data:
+            matched_record = existing.data[0]
+            last_opened = matched_record.get('last_opened_at')
+            
+            if last_opened:
+                try:
+                    last_opened_dt = datetime.fromisoformat(last_opened.replace('Z', '+00:00'))
+                    current_dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
+                    time_diff = (current_dt.replace(tzinfo=None) - last_opened_dt.replace(tzinfo=None)).total_seconds()
+                    
+                    # If opened within 2 seconds of last open, likely automated
+                    if time_diff < 2:
+                        is_duplicate_open = True
+                        logging.warning(f"Potential duplicate/automated open detected for {email} within {time_diff:.2f} seconds")
+                except Exception as e:
+                    logging.warning(f"Error checking duplicate open time: {e}")
+        
         if existing.data:
             # Update existing record
             matched_record = existing.data[0]
-            current_time = datetime.now().isoformat()
             
+            # Skip tracking if it's likely automated AND a duplicate (within 2 seconds)
+            # Note: We still track automated opens but mark them for analysis
+            if is_likely_automated and is_duplicate_open:
+                logging.info(f"Skipping duplicate automated open for {email}, campaign: {base_campaign_id}")
+                return Response(pixel_data, mimetype='image/gif')
+            
+            # current_time is already set above
             if followup_type:
                 # This is a followup email - ONLY update the corresponding followup status and timestamp
                 # DO NOT touch main email fields (status, open_count, etc.)
@@ -165,7 +219,10 @@ def track_email(email, campaign_id):
                     followup_status_field: 'Opened',
                     followup_timestamp_field: current_time
                 }
-                logging.info(f"Updated {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}")
+                # Store metadata for analysis (if your database supports it)
+                # You can add columns like: ip_address, user_agent, is_automated
+                logging.info(f"Updated {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}, "
+                           f"Automated: {is_likely_automated}, IP: {ip_address}")
             elif is_main_email:
                 # This is the main email - use existing logic
                 # Only update main email fields if explicitly marked as MAIN
@@ -182,7 +239,8 @@ def track_email(email, campaign_id):
                 if first_opened is None or first_opened == '':
                     update_data['first_opened_at'] = current_time
                 
-                logging.info(f"Updated existing record for email: {email}, campaign: {base_campaign_id}")
+                logging.info(f"Updated existing record for email: {email}, campaign: {base_campaign_id}, "
+                           f"Automated: {is_likely_automated}, IP: {ip_address}, Open Count: {current_count + 1}")
             else:
                 # URL doesn't match any pattern (not a followup, not explicitly MAIN)
                 logging.warning(f"Unrecognized tracking URL pattern for email: {email}, campaign: {campaign_id}. No update performed.")
@@ -192,7 +250,10 @@ def track_email(email, campaign_id):
             
         else:
             # Insert new record
-            current_time = datetime.now().isoformat()
+            # Skip if it's likely automated (many automated opens happen immediately)
+            if is_likely_automated:
+                logging.info(f"Skipping likely automated open for new record: {email}, campaign: {base_campaign_id}")
+                return Response(pixel_data, mimetype='image/gif')
             
             if followup_type:
                 # This is a followup email - ONLY set the corresponding followup status and timestamp
