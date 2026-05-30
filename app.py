@@ -17,430 +17,299 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-from flask import Flask, Response, request, render_template
+
+from flask import Flask, Response, request, jsonify, render_template
+from flask_cors import CORS
 import logging
 import os
 import json
-from datetime import datetime
+import hashlib
+import hmac
+from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from functools import wraps
+from typing import Optional, Dict, Any
+import re
+from urllib.parse import unquote, quote
 
-# Load environment variables from .env file
+# Load environment variables
 load_result = load_dotenv()
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Test dotenv loading
-def test_dotenv_loading():
-    """Test if .env file is loaded successfully"""
-    logging.info("=" * 50)
-    logging.info("TESTING DOTENV LOADING")
-    logging.info("=" * 50)
-    
-    # Check if .env file exists
-    env_file_path = os.path.join(os.getcwd(), '.env')
-    env_exists = os.path.exists(env_file_path)
-    logging.info(f"📁 .env file exists: {env_exists}")
-    logging.info(f"📁 .env file path: {env_file_path}")
-    
-    # Check load_dotenv result
-    logging.info(f"📥 load_dotenv() result: {load_result}")
-    
-    # Check environment variables
-    supabase_url = os.environ.get("SUPABASE_URL")
-    supabase_key = os.environ.get("SUPABASE_ANON_KEY")
-    
-    logging.info(f"🔗 SUPABASE_URL loaded: {'✅ YES' if supabase_url else '❌ NO'}")
-    if supabase_url:
-        logging.info(f"🔗 SUPABASE_URL value: {supabase_url[:30]}...")
-    else:
-        logging.info("🔗 SUPABASE_URL value: None")
-    
-    logging.info(f"🔑 SUPABASE_ANON_KEY loaded: {'✅ YES' if supabase_key else '❌ NO'}")
-    if supabase_key:
-        logging.info(f"🔑 SUPABASE_ANON_KEY value: {supabase_key[:20]}...")
-    else:
-        logging.info("🔑 SUPABASE_ANON_KEY value: None")
-    
-    # Check all environment variables starting with SUPABASE
-    supabase_vars = {k: v for k, v in os.environ.items() if k.startswith('SUPABASE')}
-    logging.info(f"📋 All SUPABASE environment variables: {list(supabase_vars.keys())}")
-    
-    logging.info("=" * 50)
-    
-    return supabase_url and supabase_key
+app = Flask(__name__)
+CORS(app)
 
-# Run the test
-test_dotenv_loading()
+# IST Timezone (UTC+5:30)
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def get_ist_now():
+    """Get current time in IST"""
+    return datetime.now(IST)
+
+def get_ist_now_str():
+    """Get current time in IST as ISO format string"""
+    return get_ist_now().isoformat()
+
+# 1x1 transparent GIF pixel
+PIXEL_DATA = bytes([
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00,
+    0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3B
+])
 
 # Supabase client configuration
-def get_supabase_client() -> Client:
+def get_supabase_client(use_service_role: bool = False) -> Client:
+    """Get Supabase client with appropriate key"""
     url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_ANON_KEY")
+    
+    if use_service_role:
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        key_type = "SERVICE_ROLE"
+    else:
+        key = os.environ.get("SUPABASE_ANON_KEY")
+        key_type = "ANON"
     
     if not url or not key:
-        raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY environment variables must be set. Please check your .env file.")
+        raise ValueError(f"SUPABASE_URL and SUPABASE_{key_type}_KEY must be set")
     
     try:
         supabase: Client = create_client(url, key)
         return supabase
     except Exception as e:
-        logging.error(f"Supabase client creation error: {e}")
+        logger.error(f"Supabase client creation error: {e}")
         raise
 
-# Check if Mails table is accessible
-def initialize_database():
-    try:
-        supabase = get_supabase_client()
-        
-        # Check if Mails table exists by trying to query it
-        result = supabase.table('Mails').select('email').limit(1).execute()
-        logging.info("Database table 'Mails' exists and is accessible")
-        
-    except Exception as e:
-        logging.warning(f"Table 'Mails' may not exist or be accessible: {e}")
-        logging.info("Please ensure your Supabase Mails table has the following columns:")
-        logging.info("- email")
-        logging.info("- campaign_id") 
-        logging.info("- status (boolean, for main email)")
-        logging.info("- f1_status (boolean, for followup 1)")
-        logging.info("- f1_opened_at (timestamp, for followup 1)")
-        logging.info("- f2_status (boolean, for followup 2)")
-        logging.info("- f2_opened_at (timestamp, for followup 2)")
-        logging.info("- f3_status (boolean, for followup 3)")
-        logging.info("- f3_opened_at (timestamp, for followup 3)")
-        logging.info("- f4_status (boolean, for followup 4)")
-        logging.info("- f4_opened_at (timestamp, for followup 4)")
-        logging.info("- open_count (optional)")
-        logging.info("- first_opened_at (optional)")
-        logging.info("- last_opened_at (optional)")
+def detect_automated_open(user_agent: str, referer: str) -> bool:
+    """Detect if the open is from an automated system"""
+    automated_patterns = [
+        'bot', 'crawler', 'spider', 'scanner', 'preview',
+        'GoogleImageProxy', 'YahooMailProxy', 'Microsoft Office',
+        'Outlook-Express', 'Thunderbird', 'AppleWebKit',
+        'EmailProxy', 'LinkChecker', 'SafeBrowsing'
+    ]
+    
+    user_agent_lower = user_agent.lower()
+    referer_lower = referer.lower()
+    
+    for pattern in automated_patterns:
+        if pattern.lower() in user_agent_lower or pattern.lower() in referer_lower:
+            return True
+    
+    return False
 
-app = Flask(__name__)
-pixel_data = (
-    b'\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00'
-    b'\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x4c\x01\x00\x3b'
-)
-@app.route('/track/<email>/<path:campaign_id>')
-def track_email(email, campaign_id):
+# Main tracking endpoint with your URL pattern
+@app.route('/track/<path:email>/<int:campaign_id>/<email_type>')
+def track_email(email, campaign_id, email_type):
+    """
+    Tracking pixel endpoint - records email opens in IST timezone
+    
+    URL format: /track/{email}/{campaign_id}/{type}
+    Example: /track/user@example.com/8/F2
+    """
     try:
+        # URL decode the email (handles @ symbol)
+        email = unquote(email)
+        
+        # Validate email type
+        valid_types = ['main', 'MAIN', 'F1', 'F2', 'F3', 'F4']
+        if email_type.upper() not in [t.upper() for t in valid_types]:
+            logger.warning(f"Invalid email type: {email_type}")
+            return Response(PIXEL_DATA, mimetype='image/gif')
+        
+        # Collect tracking data
         ip_address = request.remote_addr
         user_agent = request.headers.get('User-Agent', 'Unknown')
         referer = request.headers.get('Referer', '')
         
-        # Detect potentially automated opens (email clients, scanners, preview panes)
-        # Known automated user agents and patterns
-        automated_patterns = [
-            'GoogleImageProxy',  # Gmail image proxy
-            'YahooMailProxy',    # Yahoo Mail proxy
-            'Microsoft Office',  # Outlook
-            'Outlook-Express',   # Outlook Express
-            'Thunderbird',       # Mozilla Thunderbird
-            'Mail',              # Apple Mail
-            'AppleWebKit',       # WebKit-based clients
-            'bot',               # Generic bots
-            'crawler',           # Crawlers
-            'spider',            # Spiders
-            'scanner',           # Security scanners
-            'preview',           # Preview services
-        ]
+        # Detect automated opens
+        is_automated = detect_automated_open(user_agent, referer)
         
-        is_likely_automated = any(pattern.lower() in user_agent.lower() for pattern in automated_patterns)
+        # Record the open in database with IST time
+        record_email_open(campaign_id, email, email_type, ip_address, user_agent, referer, is_automated)
         
-        # Log detailed information for analysis
-        logging.info(f"Tracking request - Email: {email}, Campaign: {campaign_id}, IP: {ip_address}, "
-                    f"User-Agent: {user_agent[:100]}, Referer: {referer[:100]}, "
-                    f"Automated: {is_likely_automated}")
+        logger.info(f"Tracked open: {email} - Campaign: {campaign_id} - Type: {email_type} - Time (IST): {get_ist_now_str()}")
         
-        # Check if this is a followup email (F1, F2, F3, F4) or main email (MAIN)
-        followup_type = None
-        is_main_email = False
-        if '/MAIN' in campaign_id or campaign_id.endswith('/MAIN') or campaign_id.endswith('MAIN'):
-            is_main_email = True
-        elif 'F1' in campaign_id:
-            followup_type = 'F1'
-        elif 'F2' in campaign_id:
-            followup_type = 'F2'
-        elif 'F3' in campaign_id:
-            followup_type = 'F3'
-        elif 'F4' in campaign_id:
-            followup_type = 'F4'
+    except Exception as e:
+        logger.error(f"Error tracking email open: {e}")
+    
+    return Response(PIXEL_DATA, mimetype='image/gif')
+
+def record_email_open(campaign_id: int, email: str, email_type: str, ip_address: str, user_agent: str, referer: str, is_automated: bool):
+    """Record email open in the Mails table with IST timezone"""
+    try:
+        supabase = get_supabase_client(use_service_role=True)
         
-        # Store open event in Supabase Mails table
-        supabase = get_supabase_client()
+        # Get current time in IST
+        current_time_ist = get_ist_now()
+        current_time_str = current_time_ist.isoformat()
         
-        # Extract base campaign_id (remove F1, F2, F3, F4, MAIN suffix for matching)
-        base_campaign_id = campaign_id.replace('F1', '').replace('F2', '').replace('F3', '').replace('F4', '').replace('/MAIN', '').replace('MAIN', '').strip()
-        # Remove trailing slashes if any
-        base_campaign_id = base_campaign_id.rstrip('/')
-        
-        # First, try to get existing record by email and base campaign_id
-        existing = supabase.table('Mails').select('*').eq('email', email).eq('campaign_id', base_campaign_id).execute()
-        
-        # Check for duplicate opens within a short time window (likely automated)
-        # This helps filter out rapid automated requests
-        current_time = datetime.now().isoformat()
-        is_duplicate_open = False
-        
-        if existing.data:
-            matched_record = existing.data[0]
-            last_opened = matched_record.get('last_opened_at')
-            
-            if last_opened:
-                try:
-                    last_opened_dt = datetime.fromisoformat(last_opened.replace('Z', '+00:00'))
-                    current_dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
-                    time_diff = (current_dt.replace(tzinfo=None) - last_opened_dt.replace(tzinfo=None)).total_seconds()
-                    
-                    # If opened within 2 seconds of last open, likely automated
-                    if time_diff < 2:
-                        is_duplicate_open = True
-                        logging.warning(f"Potential duplicate/automated open detected for {email} within {time_diff:.2f} seconds")
-                except Exception as e:
-                    logging.warning(f"Error checking duplicate open time: {e}")
+        # Check if record exists
+        existing = supabase.table('Mails').select('*').eq('email', email).eq('campaign_id', campaign_id).execute()
         
         if existing.data:
             # Update existing record
-            matched_record = existing.data[0]
+            update_data = {
+                'last_opened_at': current_time_str,
+                'open_count': (existing.data[0].get('open_count') or 0) + 1
+            }
             
-            # Skip tracking if it's likely automated AND a duplicate (within 2 seconds)
-            # Note: We still track automated opens but mark them for analysis
-            if is_likely_automated and is_duplicate_open:
-                logging.info(f"Skipping duplicate automated open for {email}, campaign: {base_campaign_id}")
-                return Response(pixel_data, mimetype='image/gif')
+            # Set first opened if not set
+            if not existing.data[0].get('first_opened_at'):
+                update_data['first_opened_at'] = current_time_str
             
-            # current_time is already set above
-            if followup_type:
-                # This is a followup email - ONLY update the corresponding followup status and timestamp
-                # DO NOT touch main email fields (status, open_count, etc.)
-                followup_status_field = f'{followup_type}_track'  # F1_track, F2_track, etc.
-                followup_timestamp_field = f'{followup_type.lower()}_opened_at'  # f1_opened_at, f2_opened_at, etc.
-                update_data = {
-                    followup_status_field: 'Opened',
-                    followup_timestamp_field: current_time
-                }
-                # Store metadata for analysis (if your database supports it)
-                # You can add columns like: ip_address, user_agent, is_automated
-                logging.info(f"Updated {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}, "
-                           f"Automated: {is_likely_automated}, IP: {ip_address}")
-            elif is_main_email:
-                # This is the main email - use existing logic
-                # Only update main email fields if explicitly marked as MAIN
-                current_count = matched_record.get('open_count') or 0  # Handle None values
-                first_opened = matched_record.get('first_opened_at')
+            # Update specific fields based on email type
+            if email_type.upper() == 'MAIN':
+                update_data['status'] = True
+                logger.info(f"Updated main email open for {email} at IST: {current_time_str}")
                 
-                update_data = {
-                    'status': True,
-                    'open_count': current_count + 1,
-                    'last_opened_at': current_time
-                }
+            elif email_type.upper() == 'F1':
+                update_data['F1_track'] = 'Opened'
+                update_data['f1_opened_at'] = current_time_str
+                logger.info(f"Updated F1 followup open for {email} at IST: {current_time_str}")
                 
-                # If first_opened_at is None, set it now (first time opening)
-                if first_opened is None or first_opened == '':
-                    update_data['first_opened_at'] = current_time
+            elif email_type.upper() == 'F2':
+                update_data['F2_track'] = 'Opened'
+                update_data['f2_opened_at'] = current_time_str
+                logger.info(f"Updated F2 followup open for {email} at IST: {current_time_str}")
                 
-                logging.info(f"Updated existing record for email: {email}, campaign: {base_campaign_id}, "
-                           f"Automated: {is_likely_automated}, IP: {ip_address}, Open Count: {current_count + 1}")
-            else:
-                # URL doesn't match any pattern (not a followup, not explicitly MAIN)
-                logging.warning(f"Unrecognized tracking URL pattern for email: {email}, campaign: {campaign_id}. No update performed.")
-                return Response(pixel_data, mimetype='image/gif')
+            elif email_type.upper() == 'F3':
+                update_data['F3_track'] = 'Opened'
+                update_data['f3_opened_at'] = current_time_str
+                logger.info(f"Updated F3 followup open for {email} at IST: {current_time_str}")
+                
+            elif email_type.upper() == 'F4':
+                update_data['F4_track'] = 'Opened'
+                update_data['f4_opened_at'] = current_time_str
+                logger.info(f"Updated F4 followup open for {email} at IST: {current_time_str}")
             
-            result = supabase.table('Mails').update(update_data).eq('email', email).eq('campaign_id', base_campaign_id).execute()
+            # Update the record
+            result = supabase.table('Mails').update(update_data).eq('email', email).eq('campaign_id', campaign_id).execute()
+            logger.info(f"Updated record for {email} in campaign {campaign_id} - Type: {email_type}")
             
         else:
+            # Create new record
+            insert_data = {
+                'email': email,
+                'campaign_id': campaign_id,
+                'open_count': 1,
+                'first_opened_at': current_time_str,
+                'last_opened_at': current_time_str,
+                'created_at': current_time_str
+            }
+            
+            # Set specific fields based on email type
+            if email_type.upper() == 'MAIN':
+                insert_data['status'] = True
+                logger.info(f"Created new main email record for {email} at IST: {current_time_str}")
+                
+            elif email_type.upper() == 'F1':
+                insert_data['F1_track'] = 'Opened'
+                insert_data['f1_opened_at'] = current_time_str
+                logger.info(f"Created new F1 followup record for {email} at IST: {current_time_str}")
+                
+            elif email_type.upper() == 'F2':
+                insert_data['F2_track'] = 'Opened'
+                insert_data['f2_opened_at'] = current_time_str
+                logger.info(f"Created new F2 followup record for {email} at IST: {current_time_str}")
+                
+            elif email_type.upper() == 'F3':
+                insert_data['F3_track'] = 'Opened'
+                insert_data['f3_opened_at'] = current_time_str
+                logger.info(f"Created new F3 followup record for {email} at IST: {current_time_str}")
+                
+            elif email_type.upper() == 'F4':
+                insert_data['F4_track'] = 'Opened'
+                insert_data['f4_opened_at'] = current_time_str
+                logger.info(f"Created new F4 followup record for {email} at IST: {current_time_str}")
+            
             # Insert new record
-            # Skip if it's likely automated (many automated opens happen immediately)
-            if is_likely_automated:
-                logging.info(f"Skipping likely automated open for new record: {email}, campaign: {base_campaign_id}")
-                return Response(pixel_data, mimetype='image/gif')
-            
-            if followup_type:
-                # This is a followup email - ONLY set the corresponding followup status and timestamp
-                # DO NOT set main email fields (status, open_count, etc.)
-                followup_status_field = f'{followup_type}_track'  # F1_track, F2_track, etc.
-                followup_timestamp_field = f'{followup_type.lower()}_opened_at'  # f1_opened_at, f2_opened_at, etc.
-                insert_data = {
-                    'email': email,
-                    'campaign_id': base_campaign_id,
-                    followup_status_field: 'Opened',
-                    followup_timestamp_field: current_time
-                }
-                logging.info(f"Created new record with {followup_type} status and timestamp for email: {email}, campaign: {base_campaign_id}")
-            elif is_main_email:
-                # This is the main email - set main status
-                # Only set main email fields if explicitly marked as MAIN
-                insert_data = {
-                    'email': email,
-                    'campaign_id': base_campaign_id,
-                    'status': True,
-                    'open_count': 1,
-                    'first_opened_at': current_time,
-                    'last_opened_at': current_time
-                }
-                logging.info(f"Created new record for email: {email}, campaign: {base_campaign_id}")
-            else:
-                # URL doesn't match any pattern (not a followup, not explicitly MAIN)
-                logging.warning(f"Unrecognized tracking URL pattern for email: {email}, campaign: {campaign_id}. No insert performed.")
-                return Response(pixel_data, mimetype='image/gif')
-            
             result = supabase.table('Mails').insert(insert_data).execute()
+            logger.info(f"Created new record for {email} in campaign {campaign_id} - Type: {email_type}")
         
-        email_type = followup_type if followup_type else ('main' if is_main_email else 'unknown')
-        logging.info(f"Email open tracked for email: {email}, campaign: {campaign_id}, type: {email_type}")
-
+        return True
+        
     except Exception as e:
-        logging.error(f"Error logging email open: {e}")
-    return Response(pixel_data, mimetype='image/gif')
+        logger.error(f"Failed to record email open: {e}")
+        return False
 
-@app.route('/email')
-def main_email():
-    """Main email page"""
-    email = request.args.get('email', 'test@example.com')
-    campaign_id = request.args.get('campaign_id', '1')
-    base_url = os.environ.get('BACKEND_BASE_URL', 'http://127.0.0.1:5001')
-    return render_template('main_email.html', email=email, campaign_id=campaign_id, base_url=base_url)
 
-@app.route('/email/f1')
-def followup1():
-    """Followup 1 email page"""
-    email = request.args.get('email', 'test@example.com')
-    campaign_id = request.args.get('campaign_id', '1')
-    base_url = os.environ.get('BACKEND_BASE_URL', 'http://127.0.0.1:5001')
-    return render_template('followup1.html', email=email, campaign_id=campaign_id, base_url=base_url)
 
-@app.route('/email/f2')
-def followup2():
-    """Followup 2 email page"""
-    email = request.args.get('email', 'test@example.com')
-    campaign_id = request.args.get('campaign_id', '1')
-    base_url = os.environ.get('BACKEND_BASE_URL', 'http://127.0.0.1:5001')
-    return render_template('followup2.html', email=email, campaign_id=campaign_id, base_url=base_url)
 
-@app.route('/email/f3')
-def followup3():
-    """Followup 3 email page"""
-    email = request.args.get('email', 'test@example.com')
-    campaign_id = request.args.get('campaign_id', '1')
-    base_url = os.environ.get('BACKEND_BASE_URL', 'http://127.0.0.1:5001')
-    return render_template('followup3.html', email=email, campaign_id=campaign_id, base_url=base_url)
-
-@app.route('/email/f4')
-def followup4():
-    """Followup 4 email page"""
-    email = request.args.get('email', 'test@example.com')
-    campaign_id = request.args.get('campaign_id', '1')
-    base_url = os.environ.get('BACKEND_BASE_URL', 'http://127.0.0.1:5001')
-    return render_template('followup4.html', email=email, campaign_id=campaign_id, base_url=base_url)
-
-@app.route('/test-env')
-def test_environment():
-    """Test endpoint to check environment variables"""
+# Bulk generate tracking URLs for a campaign
+@app.route('/api/tracking/bulk-generate', methods=['POST'])
+def bulk_generate_tracking_urls():
+    """Generate tracking URLs for multiple recipients"""
     try:
-        supabase_url = os.environ.get("SUPABASE_URL")
-        supabase_key = os.environ.get("SUPABASE_ANON_KEY")
+        data = request.json
+        campaign_id = data.get('campaign_id')
+        recipients = data.get('recipients', [])  # List of {email, name, email_type}
         
-        env_file_path = os.path.join(os.getcwd(), '.env')
-        env_exists = os.path.exists(env_file_path)
+        if not campaign_id or not recipients:
+            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
         
-        result = {
-            "env_file_exists": env_exists,
-            "env_file_path": env_file_path,
-            "load_dotenv_result": load_result,
-            "supabase_url_loaded": bool(supabase_url),
-            "supabase_url_value": supabase_url[:30] + "..." if supabase_url else None,
-            "supabase_key_loaded": bool(supabase_key),
-            "supabase_key_value": supabase_key[:20] + "..." if supabase_key else None,
-            "all_supabase_vars": list({k: v for k, v in os.environ.items() if k.startswith('SUPABASE')}.keys())
-        }
+        base_url = os.environ.get('BACKEND_BASE_URL', 'http://localhost:5001')
+        tracking_data = []
         
-        return f"""
-        <h1>Environment Variables Test</h1>
-        <pre>{json.dumps(result, indent=2)}</pre>
-        <p><a href="/dashboard">Go to Dashboard</a></p>
-        """
+        for recipient in recipients:
+            email = recipient.get('email')
+            email_type = recipient.get('email_type', 'MAIN')
+            name = recipient.get('name', '')
+            
+            if not email:
+                continue
+            
+            # URL encode the email
+            encoded_email = quote(email, safe='')
+            
+            # Generate tracking URL for each recipient
+            tracking_url = f"{base_url}/track/{encoded_email}/{campaign_id}/{email_type}"
+            tracking_pixel = f'<img src="{tracking_url}" width="1" height="1" style="display:none;" />'
+            
+            tracking_data.append({
+                'email': email,
+                'name': name,
+                'email_type': email_type,
+                'tracking_url': tracking_url,
+                'tracking_pixel': tracking_pixel
+            })
+        
+        return jsonify({
+            'success': True,
+            'tracking_data': tracking_data,
+            'count': len(tracking_data),
+            'current_time_ist': get_ist_now_str(),
+            'timezone': 'IST'
+        })
+        
     except Exception as e:
-        return f"Error: {e}"
+        logger.error(f"Error bulk generating tracking URLs: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/dashboard2')
-def show_dashboard2():
-    """Enhanced dashboard with tracking pixel integration"""
-    try:
-        # Fetch latest opens from Mails table
-        supabase = get_supabase_client()
-        
-        result = supabase.table('Mails').select(
-            'email, campaign_id, status, open_count, first_opened_at, last_opened_at, ip_address'
-        ).order('last_opened_at', desc=True).limit(500).execute()
-        
-        records = result.data
-        headers = ['email', 'campaign_id', 'status', 'open_count', 'first_opened', 'last_opened', 'ip_address']
-        
-        def fmt(ts):
-            if ts:
-                try:
-                    # Parse ISO format timestamp and format it
-                    dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-                    return dt.strftime('%Y-%m-%d %H:%M:%S')
-                except:
-                    return str(ts)
-            return ''
-        
-        rows = [[
-            r.get('email', ''),
-            r.get('campaign_id', ''),
-            r.get('status', ''),
-            r.get('open_count', 0),
-            fmt(r.get('first_opened_at')),
-            fmt(r.get('last_opened_at')),
-            r.get('ip_address', '')
-        ] for r in records]
-        
-        sheet_name_display = "Supabase: Mails Table"
+# Health check endpoint
+@app.route('/health')
+def health():
+    """Health check endpoint with IST time"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp_ist': get_ist_now_str(),
+        'timezone': 'IST (UTC+5:30)',
+        'utc_offset': '+05:30'
+    })
 
-        return render_template('dashboard2.html', headers=headers, rows=rows, sheet_name=sheet_name_display)
-    except Exception as e:
-        return render_template('dashboard2.html', error=f"Could not retrieve data: {e}")
+# Dashboard endpoint
+@app.route('/tracking/dashboard')
+def tracking_dashboard():
+    """Analytics dashboard for tracking"""
+    return render_template('tracking_dashboard.html')
 
-@app.route('/dashboard')
-def show_dashboard():
-    try:
-        # Fetch latest opens from Mails table
-        supabase = get_supabase_client()
-        
-        result = supabase.table('Mails').select(
-            'email, campaign_id, status, open_count, first_opened_at, last_opened_at, ip_address'
-        ).order('last_opened_at', desc=True).limit(500).execute()
-        
-        records = result.data
-        headers = ['email', 'campaign_id', 'status', 'open_count', 'first_opened', 'last_opened', 'ip_address']
-        
-        def fmt(ts):
-            if ts:
-                try:
-                    # Parse ISO format timestamp and format it
-                    dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-                    return dt.strftime('%Y-%m-%d %H:%M:%S')
-                except:
-                    return str(ts)
-            return ''
-        
-        rows = [[
-            r.get('email', ''),
-            r.get('campaign_id', ''),
-            r.get('status', ''),
-            r.get('open_count', 0),
-            fmt(r.get('first_opened_at')),
-            fmt(r.get('last_opened_at')),
-            r.get('ip_address', '')
-        ] for r in records]
-        
-        sheet_name_display = "Supabase: Mails Table"
 
-        return render_template('dashboard.html', headers=headers, rows=rows, sheet_name=sheet_name_display)
-    except Exception as e:
-        return render_template('dashboard.html', error=f"Could not retrieve data: {e}")
 
 if __name__ == '__main__':
-    initialize_database()
     app.run(host='0.0.0.0', port=5001, debug=True)
